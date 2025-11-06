@@ -51,6 +51,9 @@ contract InternalSwapPool is BaseHook {
         uint amount1;
     }
 
+    /// @dev Only allows pools that have been registered
+    mapping(PoolId => bool) public supportedPools;
+
     /// Maps the amount of claimable tokens that are available to be `distributed`
     /// for a `PoolId`.
     mapping(PoolId _poolId => ClaimableFees _fees) internal _poolFees;
@@ -65,6 +68,21 @@ contract InternalSwapPool is BaseHook {
         address _nativeToken
     ) BaseHook(IPoolManager(_poolManager)) {
         nativeToken = _nativeToken;
+    }
+
+    /**
+     * @notice Registers a new pool to be used with the hook, with validation.
+     * @dev Validates that currency0 is the native token and the hook is set for the pool.
+     * @param _poolKey The PoolKey of the pool to register.
+     */
+    function registerPool(PoolKey calldata _poolKey) public {
+        // The pool must use this contract for hooks
+        require(_poolKey.hooks == IHooks(address(this)), "Hook not set for pool");
+
+        // The pool's currency0 must be the native token
+        require(Currency.unwrap(_poolKey.currency0) == nativeToken, "Pool currency0 not native");
+
+        supportedPools[_poolKey.toId()] = true;
     }
 
     /**
@@ -99,6 +117,7 @@ contract InternalSwapPool is BaseHook {
         uint _amount0,
         uint _amount1
     ) public {
+        require(supportedPools[_poolKey.toId()], "Pool not supported");
         _poolFees[_poolKey.toId()].amount0 += _amount0;
         _poolFees[_poolKey.toId()].amount1 += _amount1;
     }
@@ -136,6 +155,11 @@ contract InternalSwapPool is BaseHook {
     {
         // Get the PoolId from the PoolKey
         PoolId poolId = key.toId();
+
+        if (!supportedPools[poolId]) {
+            selector_ = IHooks.beforeSwap.selector;
+            return (selector_, beforeSwapDelta_, swapFee_);
+        }
 
         // Frontrun uniswap to sell token1 amounts from our fees into token0 ahead of
         // our fee distribution calls. This acts as a partial orderbook to remove slippage
@@ -267,6 +291,11 @@ contract InternalSwapPool is BaseHook {
         override
         returns (bytes4 selector_, int128 hookDeltaUnspecified_)
     {
+        if (!supportedPools[key.toId()]) {
+            selector_ = IHooks.afterSwap.selector;
+            return (selector_, hookDeltaUnspecified_);
+        }
+
         // Determine the currency that we will be taking our fee
         Currency swapFeeCurrency = params.amountSpecified < 0 ==
             params.zeroForOne
